@@ -1,172 +1,133 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 import folium
 from folium.plugins import MarkerCluster, HeatMap
+from streamlit_folium import folium_static
 import gdown
+import os
 
-# Load Data
-@st.cache
-def load_data():
-    # Google Drive File IDs
-    file_id_1 = '1XrsnjzE_Sp2Pd3EmTOlPj8D5ueirUMeJ'  # Vehicle Data file ID
-    file_id_2 = '1yKMQ85iLqukoEQWMGhNgcKOqwKqR68ha'  # Geo Data file ID
-    
-    # Construct URLs for gdown
-    url_1 = f'https://drive.google.com/uc?id={file_id_1}'
-    url_2 = f'https://drive.google.com/uc?id={file_id_2}'
-    
-    # Download the data using gdown
-    gdown.download(url_1, 'vehicle_data.csv', quiet=False)
-    gdown.download(url_2, 'geo_data.csv', quiet=False)
-    
-    # Load the datasets after download
-    df = pd.read_csv('vehicle_data.csv')
-    geo_df = pd.read_csv('geo_data.csv')
-    
-    # Merge datasets based on Crash_UID
-    geo_df['Crash_UID'] = geo_df['Document Nbr'].astype(str).str[-7:]
-    df['Crash_UID_Str'] = df['Crash_UID'].astype(str).str[-7:]
-    merged_df = df.merge(geo_df, left_on='Crash_UID_Str', right_on='Crash_UID', how='inner')
-    
-    return df, merged_df
+# Google Drive File IDs
+file_id_1 = '1XrsnjzE_Sp2Pd3EmTOlPj8D5ueirUMeJ'  # Vehicle Data
+file_id_2 = '1yKMQ85iLqukoEQWMGhNgcKOqwKqR68ha'  # Geo Data
 
-df, merged_df = load_data()
+# File paths
+file_1 = 'vehicle_data.csv'
+file_2 = 'geo_data.csv'
 
-# Streamlit Widgets for User Input (Slicers)
-st.title("Virginia DMV Crash Severity Analysis")
-st.sidebar.header("Select Options")
+# Download files from Google Drive if they don't exist
+if not os.path.exists(file_1):
+    gdown.download(f'https://drive.google.com/uc?id={file_id_1}', file_1, quiet=False)
+if not os.path.exists(file_2):
+    gdown.download(f'https://drive.google.com/uc?id={file_id_2}', file_2, quiet=False)
 
-# Example Slicer for selecting crash severity
-severity_score = st.sidebar.slider("Minimum Crash Severity", min_value=0, max_value=10, value=6, step=1)
+# Load and preprocess data
+@st.cache_data
+def load_and_merge_data():
+    df = pd.read_csv(file_1)
+    geo = pd.read_csv(file_2)
 
-# Example Slicer for selecting vehicle body type
-vehicle_body_types = df['VehicleBodyType'].unique()
-selected_body_type = st.sidebar.selectbox("Select Vehicle Body Type", options=["All"] + list(vehicle_body_types))
+    # Preprocessing
+    df['VehicleSpeedBeforeCrash'] = pd.to_numeric(df['VehicleSpeedBeforeCrash'], errors='coerce')
+    df['VehicleSpeedLimit'] = pd.to_numeric(df['VehicleSpeedLimit'], errors='coerce')
+    df['SpeedDiff'] = (df['VehicleSpeedBeforeCrash'] - df['VehicleSpeedLimit']).fillna(0)
 
-# Example Filter for Most Harmful Event
-events = df['MostHarmfulEvent_Value'].unique()
-selected_event = st.sidebar.selectbox("Select Most Harmful Event", options=["All"] + list(events))
+    # Severity scoring
+    def severity_score(row):
+        score = 0
+        score += 1.5 if row['VehicleDisabled'] == 'Yes' else 0
+        score += 1.5 if row['VehicleTowed'] == 'Yes' else 0
+        score += 1 if 'Severe' in row['VehicleDamage'] else 0
+        score += 2 if row['MostHarmfulEvent_Value'] in ['Overturn (Rollover)', 'Head-On', 'Motor Vehicle In Transport'] else 0
+        score += 1 if row['VehicleBodyType'] in ['Motorcycle', 'Truck - Sport Utility Vehicle (SUV)'] else 0
+        score += 1.5 if row['SpeedDiff'] > 15 else (1 if row['SpeedDiff'] > 5 else 0)
+        return score
 
-# Data Filtering based on slicer inputs
-filtered_df = df
-if selected_body_type != "All":
-    filtered_df = filtered_df[filtered_df['VehicleBodyType'] == selected_body_type]
-if selected_event != "All":
-    filtered_df = filtered_df[filtered_df['MostHarmfulEvent_Value'] == selected_event]
-filtered_df = filtered_df[filtered_df['RefinedSeverityScore'] >= severity_score]
+    df['RefinedSeverityScore'] = df.apply(severity_score, axis=1)
 
-# Show data in the main panel
-st.write(f"Displaying {filtered_df.shape[0]} rows based on selected filters.")
-st.dataframe(filtered_df.head())
+    # Match by last 7 digits
+    geo['Crash_UID'] = geo['Document Nbr'].astype(str).str[-7:]
+    df['Crash_UID_Str'] = df['Crash_UID'].astype(str).str[-7:]
 
-# Visualize Crash Severity Distribution
-st.subheader("Crash Severity Distribution")
-fig, ax = plt.subplots(figsize=(8, 5))
-sns.histplot(filtered_df['RefinedSeverityScore'], bins=20, kde=True, ax=ax)
-ax.set_title("Crash Severity Score Distribution")
-st.pyplot(fig)
+    merged = df.merge(geo, left_on='Crash_UID_Str', right_on='Crash_UID', how='inner')
+    merged['Latitude'] = pd.to_numeric(merged['y'], errors='coerce')
+    merged['Longitude'] = pd.to_numeric(merged['x'], errors='coerce')
 
-# Create the Clustering Visualization
-st.subheader("Crash Clusters by Speed and Severity")
+    # Clean recommendations
+    merged = merged.dropna(subset=['Latitude', 'Longitude', 'Recommendation'])
+    merged['Recommendation'] = merged['Recommendation'].astype(str).str.strip().str.upper()
+    merged = merged[~merged['Recommendation'].isin(['N/A', 'NAN', 'NULL', '', 'NONE'])]
 
-cluster_features = filtered_df[['VehicleSpeedBeforeCrash', 'VehicleSpeedLimit', 'RefinedSeverityScore']].dropna()
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(cluster_features)
+    return merged
 
-kmeans = KMeans(n_clusters=4, random_state=42)
-filtered_df['CrashCluster'] = kmeans.fit_predict(X_scaled)
+df = load_and_merge_data()
 
-fig, ax = plt.subplots(figsize=(8, 6))
-sns.scatterplot(x=cluster_features['VehicleSpeedBeforeCrash'], y=cluster_features['RefinedSeverityScore'],
-                hue=filtered_df['CrashCluster'], palette='Set2', ax=ax)
-ax.set_title("Crash Clusters by Speed and Severity")
-st.pyplot(fig)
+# Sidebar filters
+st.sidebar.header(" Filters")
+min_severity = st.sidebar.slider("Minimum Severity", 0.0, 10.0, 6.5, 0.5)
 
-# Feature Importance Using RandomForest
-st.subheader("Feature Importance for Predicting Crash Severity")
+filtered = df[df['RefinedSeverityScore'] >= min_severity]
 
-features = ['VehicleSpeedBeforeCrash', 'VehicleSpeedLimit', 'SpeedDiff', 'VehicleBodyType', 
-            'VehicleDamage', 'VehicleCondition', 'VehicleTowed', 'VehicleDisabled', 'MostHarmfulEvent_Value']
-df_model = df[features + ['RefinedSeverityScore']].copy()
-
-# Encode categoricals
-for col in df_model.select_dtypes(include='object').columns:
-    df_model[col] = LabelEncoder().fit_transform(df_model[col])
-
-X = df_model.drop('RefinedSeverityScore', axis=1)
-y = df_model['RefinedSeverityScore']
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-model = RandomForestRegressor(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
-
-importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=True)
-fig, ax = plt.subplots(figsize=(10, 6))
-importances.plot(kind='barh', ax=ax)
-ax.set_title("Feature Importance for Predicting Crash Severity")
-st.pyplot(fig)
-
-# Map for High-Risk Areas
-st.subheader("Crash Hotspots on Map")
-high_risk_geo = merged_df[
-    (merged_df['RefinedSeverityScore'] >= severity_score) &
-    (merged_df['Latitude'].notnull()) & 
-    (merged_df['Longitude'].notnull())
-]
-
-center_lat = high_risk_geo['Latitude'].median()
-center_lon = high_risk_geo['Longitude'].median()
-
-risk_map = folium.Map(location=[center_lat, center_lon], zoom_start=9)
-marker_cluster = MarkerCluster().add_to(risk_map)
-
+# Color function
 def get_color(sev):
-    if sev >= 7:
-        return 'darkred'
-    elif sev >= 6.5:
-        return 'orange'
-    else:
-        return 'blue'
+    if sev >= 7:
+        return 'darkred'
+    elif sev >= 6.5:
+        return 'orange'
+    else:
+        return 'blue'
 
-for _, row in high_risk_geo.iterrows():
-    popup = f"""
-    <b>Crash UID:</b> {row['Crash_UID_x']}<br>
-    <b>Severity:</b> {row['RefinedSeverityScore']}<br>
-    <b>Vehicle:</b> {row['VehicleBodyType']}<br>
-    <b>Event:</b> {row['MostHarmfulEvent_Value']}
-    """
-    folium.Marker(
-        location=[row['Latitude'], row['Longitude']],
-        popup=folium.Popup(popup, max_width=300),
-        icon=folium.Icon(color=get_color(row['RefinedSeverityScore']), icon='info-sign')
-    ).add_to(marker_cluster)
+# Main Title
+st.title(" Virginia Crash Hotspot Dashboard")
+st.markdown("This dashboard maps high-risk crash locations and safety recommendations using DMV and geospatial data.")
 
-st.subheader("Interactive Map of Crash Hotspots")
-folium_static(risk_map)
+# Map section
+if not filtered.empty:
+    center_lat = filtered['Latitude'].median()
+    center_lon = filtered['Longitude'].median()
 
-# Display Recommendations
-st.subheader("Crash Severity Recommendations")
-def generate_recommendation(row):
-    base = f"Crash site {row['Crash_UID']} has had {row['CrashCount']} crashes averaging severity {row['AvgSeverity']:.1f}."
-    if row['MostHarmfulEvent_Value'] in ['Utility Pole', 'Guard Rail', 'Ditch']:
-        infra = "Recommend physical barrier upgrades or object setbacks."
-    elif row['VehicleManeuver'] in ['Turning Left', 'Turning Right']:
-        infra = "Suggest intersection redesign or turn-slowing measures."
-    elif row['AvgMismatch'] > 10:
-        infra = "Mismatch with speed and road design — suggest speed calming and signage."
-    else:
-        infra = "Suggest comprehensive site inspection."
-    return base + " " + infra
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=9)
+    marker_cluster = MarkerCluster().add_to(m)
 
-recommendations = generate_recommendation(filtered_df)
-st.write(recommendations)
+    for _, row in filtered.iterrows():
+        popup = f"""
+        <b>Crash UID:</b> {row['Crash_UID_x']}<br>
+        <b>Severity:</b> {row['RefinedSeverityScore']}<br>
+        <b>Vehicle:</b> {row['VehicleBodyType']}<br>
+        <b>Event:</b> {row['MostHarmfulEvent_Value']}<br>
+        <b>Recommendation:</b> {row['Recommendation']}
+        """
+        folium.Marker(
+            location=[row['Latitude'], row['Longitude']],
+            popup=folium.Popup(popup, max_width=300),
+            icon=folium.Icon(color=get_color(row['RefinedSeverityScore']), icon='info-sign')
+        ).add_to(marker_cluster)
 
-# To run the Streamlit app:
-# In the terminal, run: streamlit run app.py
+    # Optional heatmap
+    heat_points = filtered[['Latitude', 'Longitude']].dropna().values.tolist()
+    HeatMap(heat_points, radius=10).add_to(m)
+
+    # Add legend
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 50px; left: 50px; width: 200px; height: 130px;
+        background-color: white; z-index:9999;
+        font-size:14px; padding:10px;
+        box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
+        border-radius: 8px;
+    ">
+    <b> Severity Legend</b><br>
+    <i class="fa fa-map-marker fa-2x" style="color:darkred"></i> Very High (7+)<br>
+    <i class="fa fa-map-marker fa-2x" style="color:orange"></i> High (6.5–7)<br>
+    <i class="fa fa-map-marker fa-2x" style="color:blue"></i> Moderate (<6.5)<br>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    folium_static(m)
+else:
+    st.warning("No crashes found for the selected filter.")
+
+# Data table
+st.subheader(" Crash Records")
+st.dataframe(filtered[['Crash_UID_x', 'RefinedSeverityScore', 'MostHarmfulEvent_Value', 'Recommendation']])
