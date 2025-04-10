@@ -10,15 +10,26 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 import folium
 from folium.plugins import MarkerCluster, HeatMap
+import gdown
 
 # Load Data
 @st.cache
 def load_data():
-    # Load the first dataset: Vehicle Data
-    df = pd.read_csv('/path/to/Vehicle Data - Virginia Department of Motor Vehicles.csv')
+    # Google Drive File IDs
+    file_id_1 = '1XrsnjzE_Sp2Pd3EmTOlPj8D5ueirUMeJ'  # Vehicle Data file ID
+    file_id_2 = '1yKMQ85iLqukoEQWMGhNgcKOqwKqR68ha'  # Geo Data file ID
     
-    # Load the second dataset: Geo-enabled Data
-    geo_df = pd.read_csv('/path/to/CrashUID_Matches_Vehicle.csv')
+    # Construct URLs for gdown
+    url_1 = f'https://drive.google.com/uc?id={file_id_1}'
+    url_2 = f'https://drive.google.com/uc?id={file_id_2}'
+    
+    # Download the data using gdown
+    gdown.download(url_1, 'vehicle_data.csv', quiet=False)
+    gdown.download(url_2, 'geo_data.csv', quiet=False)
+    
+    # Load the datasets after download
+    df = pd.read_csv('vehicle_data.csv')
+    geo_df = pd.read_csv('geo_data.csv')
     
     # Merge datasets based on Crash_UID
     geo_df['Crash_UID'] = geo_df['Document Nbr'].astype(str).str[-7:]
