@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import folium
@@ -34,7 +35,7 @@ def load_and_prepare_data():
         score = 0
         score += 1.5 if row['VehicleDisabled'] == 'Yes' else 0
         score += 1.5 if row['VehicleTowed'] == 'Yes' else 0
-        score += 1 if 'Severe' in row['VehicleDamage'] else 0
+        score += 1 if 'SEVERE' in str(row['VehicleDamage']).upper() else 0  # Fixed type error
         score += 2 if row['MostHarmfulEvent_Value'] in ['Overturn (Rollover)', 'Head-On', 'Motor Vehicle In Transport'] else 0
         score += 1 if row['VehicleBodyType'] in ['Motorcycle', 'Truck - Sport Utility Vehicle (SUV)'] else 0
         score += 1.5 if row['SpeedDiff'] > 15 else (1 if row['SpeedDiff'] > 5 else 0)
